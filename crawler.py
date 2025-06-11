@@ -1,6 +1,7 @@
 import sys
 from urllib.parse import urlparse, urljoin
 import urllib.robotparser
+import concurrent.futures
 from bs4 import BeautifulSoup
 import requests
 
@@ -37,14 +38,6 @@ def check_valid(url):
 
     except:
         print(f"Error parsing URL '{url}'")
-        return None
-
-    try:
-        headers = {'User-Agent': USER_AGENT }
-        response = requests.get(new_url, timeout=10, headers=headers)
-        response.raise_for_status()  # HTTPerror
-    except:
-        print(f"Not a valid URL {url}")
         return None
 
     return new_url
@@ -85,11 +78,11 @@ def get_links_from_url(url, robot=None):
 
     url = check_valid(url)
     if not url:
-        return None
+        return []
 
     if robot:
         if not robot.can_fetch(USER_AGENT, url):
-            return None
+            return []
 
     try:
         headers = {'User-Agent': USER_AGENT }
@@ -97,10 +90,10 @@ def get_links_from_url(url, robot=None):
         response.raise_for_status()  # HTTPerror
     except requests.exceptions.RequestException as e:
         print(f"Error fetching {url}: {e}")
-        return None
+        return []
 
     if 'text/html' not in response.headers.get('Content-Type', ''):
-        return None #ignore non-HTML content
+        return [] #ignore non-HTML content
 
     soup = BeautifulSoup(response.text, 'html.parser')
     found_links = []
@@ -122,7 +115,7 @@ def main_crawl(url):
             (None if there are errors)     
     '''
 
-    #Check initial URL for validity
+    #Check initial URL for valid format
     url = check_valid(url)
     if not url:
         return None
@@ -140,27 +133,31 @@ def main_crawl(url):
     parsed_orig = urlparse(url)
     subdomain = f"{parsed_orig.netloc}/{parsed_orig.path}"
 
-    while url_queue:
-        myurl = url_queue.pop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
 
-        if not check_valid(myurl):
-            continue #skip if not url
+        while url_queue:
+            myurl = url_queue.pop()
 
-        if myurl in visited:
-            continue #skip if visited
-        visited.append(myurl)
+            if not check_valid(myurl):
+                continue #skip if not url
 
-        mylinks = get_links_from_url (myurl,robot=rp) #get list of links
+            if myurl in visited:
+                continue #skip if visited
 
-        if mylinks:
-            for follow_url in mylinks:
-                #Have we already visited it?
-                if (follow_url in visited) or (follow_url.rstrip('/') in visited):
-                    continue
+            future = executor.submit(get_links_from_url, myurl, rp)
+            mylinks = future.result(timeout=120)
 
-                #Is it from the same base domain as the original URL?
-                if subdomain in follow_url:
-                    url_queue.append(follow_url) #append to end of queue
+            visited.append(myurl)
+
+            if mylinks:
+                for follow_url in mylinks:
+                    #Have we already visited it?
+                    if (follow_url in visited) or (follow_url.rstrip('/') in visited):
+                        continue
+
+                    #Is it from the same base domain as the original URL?
+                    if subdomain in follow_url:
+                        url_queue.append(follow_url) #append to end of queue
 
     return visited
 
@@ -177,7 +174,7 @@ if __name__ == "__main__":
         else:
             outfile = 'links.txt'
     else:
-        print(f"USAGE: python {sys.argv[0]} url_to_scrape [output_text_file_name]")
+        print(f"USAGE: python {sys.argv[0]} url_to_scrape")
         sys.exit(1)
 
     links = main_crawl(testurl)
